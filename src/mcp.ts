@@ -23,11 +23,9 @@ function formatDbMessageForJson(msg: DbMessage) {
     chat_jid: msg.chat_jid,
     chat_name: msg.chat_name ?? "Unknown Chat",
     sender_jid: msg.sender ?? null,
-    sender_display: msg.sender
-      ? msg.sender.split("@")[0]
-      : msg.is_from_me
-        ? "Me"
-        : "Unknown",
+    sender_display: msg.is_from_me
+      ? "Me"
+      : (msg.sender_name ?? (msg.sender ? msg.sender.split("@")[0] : "Unknown")),
     content: msg.content,
     timestamp: msg.timestamp.toISOString(),
     is_from_me: msg.is_from_me,
@@ -239,9 +237,8 @@ export async function startMcpServer(
             content: [
               {
                 type: "text",
-                text: `No more chats found on page ${page}${
-                  query ? ` matching "${query}"` : ""
-                }.`,
+                text: `No more chats found on page ${page}${query ? ` matching "${query}"` : ""
+                  }.`,
               },
             ],
           };

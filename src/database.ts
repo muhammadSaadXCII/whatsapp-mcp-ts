@@ -18,6 +18,7 @@ export type Message = {
   id: string;
   chat_jid: string;
   sender?: string | null;
+  sender_name?: string | null;
   content: string;
   timestamp: Date;
   is_from_me: boolean;
@@ -62,7 +63,7 @@ export function initializeDatabase(): DatabaseSync {
         );
     `);
 
-    db.exec(`
+  db.exec(`
       CREATE TABLE IF NOT EXISTS contacts (
         jid TEXT PRIMARY KEY,
         name TEXT,
@@ -87,25 +88,33 @@ export function initializeDatabase(): DatabaseSync {
   return db;
 }
 
+function toIsoOrNull(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString();
+  const s = String(v);
+  return s === "" || s === "undefined" || s === "null" ? null : s;
+}
+
 export function storeChat(chat: Partial<Chat> & { jid: string }): void {
   const db = getDb();
   try {
     const stmt = db.prepare(`
-            INSERT INTO chats (jid, name, last_message_time)
-            VALUES (@jid, @name, @last_message_time)
-            ON CONFLICT(jid) DO UPDATE SET
-                name = COALESCE(excluded.name, name),
-                last_message_time = COALESCE(excluded.last_message_time, last_message_time)
-        `);
+      INSERT INTO chats (jid, name, last_message_time)
+      VALUES (@jid, @name, @last_message_time)
+      ON CONFLICT(jid) DO UPDATE SET
+        name = COALESCE(excluded.name, name),
+        last_message_time = CASE
+          WHEN excluded.last_message_time IS NULL THEN last_message_time
+          WHEN last_message_time IS NULL OR last_message_time = 'undefined'
+               OR excluded.last_message_time > last_message_time
+            THEN excluded.last_message_time
+          ELSE last_message_time
+        END
+    `);
     stmt.run({
       jid: chat.jid,
       name: chat.name ?? null,
-      last_message_time:
-        chat.last_message_time instanceof Date
-          ? chat.last_message_time.toISOString()
-          : chat.last_message_time === null
-            ? null
-            : String(chat.last_message_time),
+      last_message_time: toIsoOrNull(chat.last_message_time),
     });
   } catch (error) {
     console.error("Error storing chat:", error);
@@ -160,6 +169,7 @@ function rowToMessage(row: any): Message {
     id: row.id,
     chat_jid: row.chat_jid,
     sender: row.sender,
+    sender_name: row.sender_name,
     content: row.content,
     timestamp: parseDateSafe(row.timestamp)!,
     is_from_me: Boolean(row.is_from_me),
@@ -179,6 +189,16 @@ function rowToChat(row: any): Chat {
   };
 }
 
+const MSG_SELECT = `
+  SELECT m.*,
+         COALESCE(c.name, cc.name, cc.notify, cc.phone_number) AS chat_name,
+         COALESCE(cs.name, cs.notify, cs.phone_number) AS sender_name
+  FROM messages m
+  JOIN chats c ON m.chat_jid = c.jid
+  LEFT JOIN contacts cc ON cc.jid = c.jid
+  LEFT JOIN contacts cs ON cs.jid = m.sender
+`;
+
 export function getMessages(
   chatJid: string,
   limit: number = 20,
@@ -187,15 +207,7 @@ export function getMessages(
   const db = getDb();
   try {
     const offset = page * limit;
-    const stmt = db.prepare(`
-            SELECT m.*, c.name as chat_name
-            FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.chat_jid = ? -- Positional parameter 1
-            ORDER BY m.timestamp DESC
-            LIMIT ?             -- Positional parameter 2
-            OFFSET ?            -- Positional parameter 3
-        `);
+    const stmt = db.prepare(`${MSG_SELECT} WHERE m.chat_jid = ? ORDER BY m.timestamp DESC LIMIT ? OFFSET ?`);
     const rows = stmt.all(chatJid, limit, offset) as any[];
     return rows.map(rowToMessage);
   } catch (error) {
@@ -219,15 +231,14 @@ export function getChats(
                 c.jid,
                 COALESCE(c.name, ct.name, ct.notify, ct.phone_number) as name,
                 c.last_message_time
-                ${
-                  includeLastMessage
-                    ? `,
+                ${includeLastMessage
+        ? `,
                 (SELECT m.content FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_message,
                 (SELECT m.sender FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender,
                 (SELECT m.is_from_me FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_is_from_me
                 `
-                    : ""
-                }
+        : ""
+      }
             FROM chats c
             LEFT JOIN contacts ct ON c.jid = ct.jid
         `;
@@ -268,15 +279,14 @@ export function getChat(
                 c.jid,
                 COALESCE(c.name, ct.name, ct.notify, ct.phone_number) as name,
                 c.last_message_time
-                ${
-                  includeLastMessage
-                    ? `,
+                ${includeLastMessage
+        ? `,
                 (SELECT m.content FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_message,
                 (SELECT m.sender FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender,
                 (SELECT m.is_from_me FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_is_from_me
                 `
-                    : ""
-                }
+        : ""
+      }
             FROM chats c
             LEFT JOIN contacts ct ON c.jid = ct.jid
             WHERE c.jid = ? -- Positional parameter 1
@@ -304,12 +314,7 @@ export function getMessagesAround(
   } = { before: [], target: null, after: [] };
 
   try {
-    const targetStmt = db.prepare(`
-             SELECT m.*, c.name as chat_name
-             FROM messages m
-             JOIN chats c ON m.chat_jid = c.jid
-             WHERE m.id = ? -- Positional parameter 1
-        `);
+    const targetStmt = db.prepare(`${MSG_SELECT} WHERE m.id = ?`);
     const targetRow = targetStmt.get(messageId) as any | undefined;
 
     if (!targetRow) {
@@ -319,14 +324,7 @@ export function getMessagesAround(
     const targetTimestamp = result.target.timestamp.toISOString();
     const chatJid = result.target.chat_jid;
 
-    const beforeStmt = db.prepare(`
-            SELECT m.*, c.name as chat_name
-            FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.chat_jid = ? AND m.timestamp < ? -- Positional params 1, 2
-            ORDER BY m.timestamp DESC
-            LIMIT ?                                  -- Positional param 3
-        `);
+    const beforeStmt = db.prepare(`${MSG_SELECT} WHERE m.chat_jid = ? AND m.timestamp < ? ORDER BY m.timestamp DESC LIMIT ?`);
     const beforeRows = beforeStmt.all(
       chatJid,
       targetTimestamp,
@@ -334,14 +332,7 @@ export function getMessagesAround(
     ) as any[];
     result.before = beforeRows.map(rowToMessage).reverse();
 
-    const afterStmt = db.prepare(`
-            SELECT m.*, c.name as chat_name
-            FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.chat_jid = ? AND m.timestamp > ? -- Positional params 1, 2
-            ORDER BY m.timestamp ASC
-            LIMIT ?                                  -- Positional param 3
-        `);
+    const afterStmt = db.prepare(`${MSG_SELECT} WHERE m.chat_jid = ? AND m.timestamp > ? ORDER BY m.timestamp ASC LIMIT ?`);
     const afterRows = afterStmt.all(chatJid, targetTimestamp, after) as any[];
     result.after = afterRows.map(rowToMessage);
 
@@ -395,13 +386,7 @@ export function searchMessages(
   try {
     const offset = page * limit;
     const searchPattern = `%${searchQuery}%`;
-    let sql = `
-            SELECT m.*, COALESCE(c.name, ct.name, ct.notify, ct.phone_number) as chat_name
-            FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
-            LEFT JOIN contacts ct ON c.jid = ct.jid
-            WHERE LOWER(m.content) LIKE LOWER(?) -- Param 1: searchPattern
-        `;
+    let sql = `${MSG_SELECT} WHERE LOWER(m.content) LIKE LOWER(?)`;
     const params: (string | number | null)[] = [searchPattern];
 
     if (chatJid) {

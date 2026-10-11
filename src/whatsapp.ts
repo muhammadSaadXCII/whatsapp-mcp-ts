@@ -42,11 +42,10 @@ function parseMessageForDb(msg: WAMessage): DbMessage | null {
   } else if (msg.message.videoMessage?.caption) {
     content = `[Video] ${msg.message.videoMessage.caption}`;
   } else if (msg.message.documentMessage?.caption) {
-    content = `[Document] ${
-      msg.message.documentMessage.caption ||
+    content = `[Document] ${msg.message.documentMessage.caption ||
       msg.message.documentMessage.fileName ||
       ""
-    }`;
+      }`;
   } else if (msg.message.audioMessage) {
     content = `[Audio]`;
   } else if (msg.message.stickerMessage) {
@@ -76,7 +75,7 @@ function parseMessageForDb(msg: WAMessage): DbMessage | null {
 
   const timestamp = new Date(timestampSeconds * 1000);
 
-  let senderJid: string | null | undefined = msg.key.participant;
+  let senderJid: string | null | undefined = msg.key.participant ?? msg.participant;
   if (!msg.key.fromMe && !senderJid && !isJidGroup(msg.key.remoteJid)) {
     senderJid = msg.key.remoteJid;
   }
@@ -92,6 +91,13 @@ function parseMessageForDb(msg: WAMessage): DbMessage | null {
     timestamp: timestamp,
     is_from_me: msg.key.fromMe ?? false,
   };
+}
+
+function rememberPushName(msg: WAMessage, parsed: DbMessage) {
+  if (!msg.pushName || parsed.is_from_me) return;
+  const who = parsed.sender ?? parsed.chat_jid;
+  if (who.endsWith("@g.us") || who.endsWith("@newsletter")) return;
+  storeContact({ jid: who, notify: msg.pushName });
 }
 
 export async function startWhatsAppConnection(
@@ -111,7 +117,6 @@ export async function startWhatsAppConnection(
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
     generateHighQualityLinkPreview: true,
-    shouldIgnoreJid: (jid) => isJidGroup(jid),
   });
 
   sock.ev.process(async (events) => {
@@ -131,8 +136,7 @@ export async function startWhatsAppConnection(
       if (connection === "close") {
         const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
         logger.warn(
-          `Connection closed. Reason: ${
-            DisconnectReason[statusCode as number] || "Unknown"
+          `Connection closed. Reason: ${DisconnectReason[statusCode as number] || "Unknown"
           }`,
           lastDisconnect?.error
         );
@@ -161,14 +165,12 @@ export async function startWhatsAppConnection(
         events["messaging-history.set"];
       if (contacts.length > 0) {
         logger.info(`Storing ${contacts.length} contacts from history sync.`);
-        contacts.forEach((c) =>
-          storeContact({
-            jid: c.id,
-            name: c.name ?? null,
-            notify: c.notify ?? null,
-            phoneNumber: (c as any).phoneNumber ?? null,
-          })
-        );
+        contacts.forEach((c) => {
+          const base = { name: c.name ?? null, notify: c.notify ?? null, phoneNumber: (c as any).phoneNumber ?? null };
+          storeContact({ jid: c.id, ...base });
+          const lid = (c as any).lid;
+          if (lid && lid !== c.id) storeContact({ jid: lid, ...base });
+        });
         logger.info(`Stored ${contacts.length} contacts from history sync.`);
       }
 
@@ -188,6 +190,7 @@ export async function startWhatsAppConnection(
         const parsed = parseMessageForDb(msg);
         if (parsed) {
           storeMessage(parsed);
+          rememberPushName(msg, parsed);
           storedCount++;
         }
       });
@@ -215,6 +218,7 @@ export async function startWhatsAppConnection(
               `Storing message: ${parsed.content.substring(0, 50)}...`
             );
             storeMessage(parsed);
+            rememberPushName(msg, parsed);
           } else {
             logger.warn(
               { msgId: msg.key?.id, chatId: msg.key?.remoteJid },
