@@ -25,6 +25,16 @@ export type Message = {
   chat_name?: string | null;
 };
 
+export interface MessageFilters {
+  chatJid?: string | null;
+  senderJid?: string | null;
+  query?: string | null;
+  after?: string | null; // ISO string
+  before?: string | null; // ISO string
+  limit?: number;
+  page?: number;
+};
+
 let dbInstance: DatabaseSync | null = null;
 
 function getDb(): DatabaseSync {
@@ -349,27 +359,24 @@ export function searchDbForContacts(
 ): { jid: string; name: string | null }[] {
   const db = getDb();
   try {
-    const pattern = `%${query}%`;
+    const tokens = query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((t) => t.length >= 2);
+    if (!tokens.length) tokens.push(query.toLowerCase());
 
-    const stmt = db.prepare(`
-      SELECT
-        jid,
-        COALESCE(name, notify, phone_number, jid) AS display_name
-      FROM contacts
-      WHERE
-        LOWER(COALESCE(name, notify, phone_number, jid)) LIKE LOWER(?)
-      LIMIT ?
-    `);
+    const rows = db
+      .prepare(
+        `SELECT jid,
+                COALESCE(name, notify, phone_number, jid) AS display_name,
+                LOWER(COALESCE(name, '') || ' ' || COALESCE(notify, '') || ' ' || COALESCE(phone_number, '') || ' ' || jid) AS haystack
+         FROM contacts`,
+      )
+      .all() as { jid: string; display_name: string | null; haystack: string }[];
 
-    const rows = stmt.all(pattern, limit) as {
-      jid: string;
-      display_name: string | null;
-    }[];
-
-    return rows.map((r) => ({
-      jid: r.jid,
-      name: r.display_name,
-    }));
+    return rows
+      .map((r) => ({ r, score: tokens.filter((t) => r.haystack.includes(t)).length }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map((x) => ({ jid: x.r.jid, name: x.r.display_name }));
   } catch (error) {
     console.error("Error searching contacts:", error);
     return [];
@@ -405,6 +412,139 @@ export function searchMessages(
     return rows.map(rowToMessage);
   } catch (error) {
     console.error("Error searching messages:", error);
+    return [];
+  }
+}
+
+const CHAT_SELECT = `
+  SELECT c.jid,
+         COALESCE(c.name, ct.name, ct.notify, ct.phone_number) AS name,
+         c.last_message_time,
+         (SELECT m.content FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) AS last_message,
+         (SELECT m.sender FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) AS last_sender,
+         (SELECT m.is_from_me FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) AS last_is_from_me,
+         COALESCE(c.name, '') || ' ' || COALESCE(ct.name, '') || ' ' || COALESCE(ct.notify, '') || ' ' || COALESCE(ct.phone_number, '') AS haystack
+  FROM chats c
+  LEFT JOIN contacts ct ON ct.jid = c.jid
+`;
+
+// Accepts a full JID, or a phone number (digits, with country code)
+function contactPattern(input: string): string {
+  if (input.includes("@")) return input;
+  const digits = input.replace(/\D/g, "");
+  return digits.length >= 6 ? `%${digits}%` : `%${input}%`;
+}
+
+export function getDirectChatByContact(query: string): Chat | null {
+  const db = getDb();
+  try {
+    const byNumber = contactPattern(query);
+    const byName = `%${query}%`;
+    const row = db
+      .prepare(
+        `${CHAT_SELECT}
+         WHERE c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid != 'status@broadcast'
+           AND (c.jid LIKE ?
+                OR LOWER(COALESCE(c.name, '')) LIKE LOWER(?)
+                OR LOWER(COALESCE(ct.name, '')) LIKE LOWER(?)
+                OR LOWER(COALESCE(ct.notify, '')) LIKE LOWER(?)
+                OR COALESCE(ct.phone_number, '') LIKE ?)
+         ORDER BY c.last_message_time DESC NULLS LAST
+         LIMIT 1`,
+      )
+      .get(byNumber, byName, byName, byName, byNumber) as any | undefined;
+    return row ? rowToChat(row) : null;
+  } catch (error) {
+    console.error("Error in getDirectChatByContact:", error);
+    return null;
+  }
+}
+
+export function findDirectChats(query: string, limit: number = 5): Chat[] {
+  const db = getDb();
+  try {
+    const digits = query.replace(/\D/g, "");
+    const tokens = query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((t) => t.length >= 2);
+    const rows = db
+      .prepare(
+        `${CHAT_SELECT}
+         WHERE c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid != 'status@broadcast'`,
+      )
+      .all() as any[];
+
+    return rows
+      .map((r) => {
+        const hay = String(r.haystack ?? "").toLowerCase();
+        let score = digits.length >= 6 && String(r.jid).includes(digits) ? 10 : 0;
+        for (const t of tokens) if (hay.includes(t)) score += 1;
+        return { r, score };
+      })
+      .filter((x) => x.score > 0)
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          String(b.r.last_message_time ?? "").localeCompare(String(a.r.last_message_time ?? "")),
+      )
+      .slice(0, limit)
+      .map((x) => rowToChat(x.r));
+  } catch (error) {
+    console.error("Error in findDirectChats:", error);
+    return [];
+  }
+}
+
+export function getContactChats(contact: string, limit: number = 20, page: number = 0): Chat[] {
+  const db = getDb();
+  try {
+    const like = contactPattern(contact);
+    const rows = db
+      .prepare(
+        `${CHAT_SELECT}
+         WHERE c.jid LIKE ?
+            OR c.jid IN (SELECT DISTINCT m.chat_jid FROM messages m WHERE m.sender LIKE ?)
+         ORDER BY c.last_message_time DESC NULLS LAST
+         LIMIT ? OFFSET ?`,
+      )
+      .all(like, like, limit, page * limit) as any[];
+    return rows.map(rowToChat);
+  } catch (error) {
+    console.error("Error in getContactChats:", error);
+    return [];
+  }
+}
+
+export function getLastInteraction(contact: string): Message | null {
+  const db = getDb();
+  try {
+    const like = contactPattern(contact);
+    const row = db
+      .prepare(`${MSG_SELECT} WHERE m.chat_jid LIKE ? OR m.sender LIKE ? ORDER BY m.timestamp DESC LIMIT 1`)
+      .get(like, like) as any | undefined;
+    return row ? rowToMessage(row) : null;
+  } catch (error) {
+    console.error("Error in getLastInteraction:", error);
+    return null;
+  }
+}
+
+export function listMessagesFiltered(f: MessageFilters): Message[] {
+  const db = getDb();
+  try {
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+    if (f.chatJid) { where.push("m.chat_jid = ?"); params.push(f.chatJid); }
+    if (f.senderJid) { where.push("m.sender LIKE ?"); params.push(contactPattern(f.senderJid)); }
+    if (f.query) { where.push("LOWER(m.content) LIKE LOWER(?)"); params.push(`%${f.query}%`); }
+    if (f.after) { where.push("m.timestamp > ?"); params.push(f.after); }
+    if (f.before) { where.push("m.timestamp < ?"); params.push(f.before); }
+    const limit = f.limit ?? 20;
+    const offset = (f.page ?? 0) * limit;
+    const sql = `${MSG_SELECT} ${where.length ? "WHERE " + where.join(" AND ") : ""}
+                 ORDER BY m.timestamp DESC LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
+    return (db.prepare(sql).all(...params) as any[]).map(rowToMessage);
+  } catch (error) {
+    console.error("Error in listMessagesFiltered:", error);
     return [];
   }
 }

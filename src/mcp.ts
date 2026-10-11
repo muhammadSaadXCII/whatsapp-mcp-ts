@@ -12,6 +12,11 @@ import {
   getMessagesAround,
   searchDbForContacts,
   searchMessages,
+  getDirectChatByContact,
+  getContactChats,
+  getLastInteraction,
+  listMessagesFiltered,
+  findDirectChats
 } from "./database.ts";
 
 import { sendWhatsAppMessage, type WhatsAppSocket } from "./whatsapp.ts";
@@ -48,6 +53,11 @@ function formatDbChatForJson(chat: DbChat) {
     last_is_from_me: chat.last_is_from_me ?? null,
   };
 }
+
+const ok = (data: unknown) => ({
+  content: [{ type: "text" as const, text: typeof data === "string" ? data : JSON.stringify(data, null, 2) }],
+});
+const fail = (msg: string) => ({ isError: true, content: [{ type: "text" as const, text: msg }] });
 
 export async function startMcpServer(
   sock: WhatsAppSocket | null,
@@ -111,70 +121,102 @@ export async function startMcpServer(
   server.tool(
     "list_messages",
     {
-      chat_jid: z
-        .string()
-        .describe(
-          "The JID of the chat (e.g., '123456@s.whatsapp.net' or 'group@g.us')",
-        ),
-      limit: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .default(20)
-        .describe("Max messages per page (default 20)"),
-      page: z
-        .number()
-        .int()
-        .nonnegative()
-        .optional()
-        .default(0)
-        .describe("Page number (0-indexed, default 0)"),
+      chat_jid: z.string().optional().describe("Limit to one chat (e.g. '123@s.whatsapp.net' or 'group@g.us'). Omit to search all chats."),
+      sender: z.string().optional().describe("Only messages from this sender (JID, or phone number with country code)"),
+      query: z.string().optional().describe("Only messages whose text contains this"),
+      after: z.string().optional().describe("Only messages after this date/time (ISO, e.g. 2026-10-01)"),
+      before: z.string().optional().describe("Only messages before this date/time (ISO)"),
+      limit: z.number().int().positive().max(100).optional().default(20).describe("Max messages per page (default 20, max 100)"),
+      page: z.number().int().nonnegative().optional().default(0).describe("Page number (0-indexed)"),
+      include_context: z.boolean().optional().default(false).describe("Also return surrounding messages for each result"),
+      context_before: z.number().int().nonnegative().max(10).optional().default(1),
+      context_after: z.number().int().nonnegative().max(10).optional().default(1),
     },
-    async ({ chat_jid, limit, page }) => {
-      mcpLogger.info(
-        `[MCP Tool] Executing list_messages for chat ${chat_jid}, limit=${limit}, page=${page}`,
-      );
+    async ({ chat_jid, sender, query, after, before, limit, page, include_context, context_before, context_after }) => {
+      mcpLogger.info(`[MCP Tool] Executing list_messages chat=${chat_jid} sender=${sender} query=${query} limit=${limit} page=${page}`);
       try {
-        const messages = getMessages(chat_jid, limit, page);
-        if (!messages.length && page === 0) {
-          return {
-            content: [
-              { type: "text", text: `No messages found for chat ${chat_jid}.` },
-            ],
-          };
-        } else if (!messages.length) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `No more messages found on page ${page} for chat ${chat_jid}.`,
-              },
-            ],
-          };
-        }
-        const formattedMessages = messages.map(formatDbMessageForJson);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(formattedMessages, null, 2),
-            },
-          ],
+        const toIso = (s?: string) => {
+          if (!s) return undefined;
+          const d = new Date(s);
+          if (Number.isNaN(d.getTime())) throw new Error(`Invalid date: "${s}"`);
+          return d.toISOString();
         };
-      } catch (error: any) {
-        mcpLogger.error(
-          `[MCP Tool Error] list_messages failed for ${chat_jid}: ${error.message}`,
+        const messages = listMessagesFiltered({
+          chatJid: chat_jid, senderJid: sender, query,
+          after: toIso(after), before: toIso(before), limit, page,
+        });
+        if (!messages.length) return ok("No messages found.");
+        if (!include_context) return ok(messages.map(formatDbMessageForJson));
+        return ok(
+          messages.map((m) => {
+            const ctx = getMessagesAround(m.id, context_before, context_after);
+            return {
+              message: formatDbMessageForJson(m),
+              before: ctx.before.map(formatDbMessageForJson),
+              after: ctx.after.map(formatDbMessageForJson),
+            };
+          }),
         );
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `Error listing messages for ${chat_jid}: ${error.message}`,
-            },
-          ],
-        };
+      } catch (error: any) {
+        mcpLogger.error(`[MCP Tool Error] list_messages failed: ${error.message}`);
+        return fail(`Error listing messages: ${error.message}`);
+      }
+    },
+  );
+
+  server.tool(
+    "get_direct_chat_by_contact",
+    {
+      contact: z
+        .string()
+        .min(1)
+        .describe(
+          "Contact name, push name, or phone number with country code. Returns up to 5 ranked candidates; if more than one looks plausible, ask the user which one.",
+        ),
+    },
+    async ({ contact }) => {
+      mcpLogger.info(`[MCP Tool] Executing get_direct_chat_by_contact for "${contact}"`);
+      try {
+        const chats = findDirectChats(contact, 5);
+        return chats.length
+          ? ok(chats.map(formatDbChatForJson))
+          : ok(
+            `No direct chat matched "${contact}". The saved contact name may not be stored. Do not keep retrying; ask the user for a phone number or the exact chat name.`,
+          );
+      } catch (error: any) {
+        return fail(`Error: ${error.message}`);
+      }
+    },
+  );
+
+  server.tool(
+    "get_contact_chats",
+    {
+      contact: z.string().min(1).describe("Contact JID or phone number with country code (use search_contacts first for names)"),
+      limit: z.number().int().positive().max(100).optional().default(20),
+      page: z.number().int().nonnegative().optional().default(0),
+    },
+    async ({ contact, limit, page }) => {
+      mcpLogger.info(`[MCP Tool] Executing get_contact_chats for "${contact}"`);
+      try {
+        const chats = getContactChats(contact, limit, page);
+        return chats.length ? ok(chats.map(formatDbChatForJson)) : ok(`No chats found involving "${contact}".`);
+      } catch (error: any) {
+        return fail(`Error: ${error.message}`);
+      }
+    },
+  );
+
+  server.tool(
+    "get_last_interaction",
+    { contact: z.string().min(1).describe("Contact JID or phone number with country code (use search_contacts first for names)") },
+    async ({ contact }) => {
+      mcpLogger.info(`[MCP Tool] Executing get_last_interaction for "${contact}"`);
+      try {
+        const msg = getLastInteraction(contact);
+        return msg ? ok(formatDbMessageForJson(msg)) : ok(`No messages found for "${contact}".`);
+      } catch (error: any) {
+        return fail(`Error: ${error.message}`);
       }
     },
   );
