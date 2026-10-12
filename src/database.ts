@@ -14,6 +14,16 @@ export interface Chat {
   last_is_from_me?: boolean | null;
 }
 
+export interface MediaRow {
+  message_id: string;
+  chat_jid: string;
+  media_type: string | null;
+  filename: string | null;
+  mimetype: string | null;
+  file_length: number | null;
+  raw: string;
+}
+
 export type Message = {
   id: string;
   chat_jid: string;
@@ -23,16 +33,19 @@ export type Message = {
   timestamp: Date;
   is_from_me: boolean;
   chat_name?: string | null;
+  media_type?: string | null;
 };
 
 export interface MessageFilters {
   chatJid?: string | null;
+  chatName?: string | null;
   senderJid?: string | null;
   query?: string | null;
   after?: string | null; // ISO string
   before?: string | null; // ISO string
   limit?: number;
   page?: number;
+  mediaType?: string | null;
 };
 
 let dbInstance: DatabaseSync | null = null;
@@ -79,6 +92,19 @@ export function initializeDatabase(): DatabaseSync {
         name TEXT,
         notify TEXT,
         phone_number TEXT
+      );
+    `);
+
+  db.exec(`
+      CREATE TABLE IF NOT EXISTS media_raw (
+        message_id TEXT NOT NULL,
+        chat_jid TEXT NOT NULL,
+        media_type TEXT,
+        filename TEXT,
+        mimetype TEXT,
+        file_length INTEGER,
+        raw TEXT NOT NULL,
+        PRIMARY KEY (message_id, chat_jid)
       );
     `);
 
@@ -184,6 +210,7 @@ function rowToMessage(row: any): Message {
     timestamp: parseDateSafe(row.timestamp)!,
     is_from_me: Boolean(row.is_from_me),
     chat_name: row.chat_name,
+    media_type: row.media_type ?? null,
   };
 }
 
@@ -202,11 +229,13 @@ function rowToChat(row: any): Chat {
 const MSG_SELECT = `
   SELECT m.*,
          COALESCE(c.name, cc.name, cc.notify, cc.phone_number) AS chat_name,
-         COALESCE(cs.name, cs.notify, cs.phone_number) AS sender_name
+         COALESCE(cs.name, cs.notify, cs.phone_number) AS sender_name,
+         mr.media_type AS media_type
   FROM messages m
   JOIN chats c ON m.chat_jid = c.jid
   LEFT JOIN contacts cc ON cc.jid = c.jid
   LEFT JOIN contacts cs ON cs.jid = m.sender
+  LEFT JOIN media_raw mr ON mr.message_id = m.id AND mr.chat_jid = m.chat_jid
 `;
 
 export function getMessages(
@@ -533,10 +562,19 @@ export function listMessagesFiltered(f: MessageFilters): Message[] {
     const where: string[] = [];
     const params: (string | number)[] = [];
     if (f.chatJid) { where.push("m.chat_jid = ?"); params.push(f.chatJid); }
+    if (f.chatName) {
+      const tokens = f.chatName.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((t) => t.length >= 2);
+      if (!tokens.length) tokens.push(f.chatName.toLowerCase());
+      for (const t of tokens) {
+        where.push(`LOWER(COALESCE(c.name,'') || ' ' || COALESCE(cc.name,'') || ' ' || COALESCE(cc.notify,'')) LIKE ?`);
+        params.push(`%${t}%`);
+      }
+    }
     if (f.senderJid) { where.push("m.sender LIKE ?"); params.push(contactPattern(f.senderJid)); }
     if (f.query) { where.push("LOWER(m.content) LIKE LOWER(?)"); params.push(`%${f.query}%`); }
     if (f.after) { where.push("m.timestamp > ?"); params.push(f.after); }
     if (f.before) { where.push("m.timestamp < ?"); params.push(f.before); }
+    if (f.mediaType) { where.push("mr.media_type = ?"); params.push(f.mediaType); }
     const limit = f.limit ?? 20;
     const offset = (f.page ?? 0) * limit;
     const sql = `${MSG_SELECT} ${where.length ? "WHERE " + where.join(" AND ") : ""}
@@ -586,5 +624,30 @@ export function storeContact(contact: {
     });
   } catch (error) {
     console.error("Error storing contact:", error);
+  }
+}
+
+export function storeMediaRaw(m: MediaRow): void {
+  const db = getDb();
+  try {
+    db.prepare(
+      `INSERT OR REPLACE INTO media_raw (message_id, chat_jid, media_type, filename, mimetype, file_length, raw)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(m.message_id, m.chat_jid, m.media_type, m.filename, m.mimetype, m.file_length, m.raw);
+  } catch (error) {
+    console.error("Error storing media:", error);
+  }
+}
+
+export function getMediaRaw(messageId: string, chatJid?: string | null): MediaRow | null {
+  const db = getDb();
+  try {
+    const row = chatJid
+      ? db.prepare(`SELECT * FROM media_raw WHERE message_id = ? AND chat_jid = ?`).get(messageId, chatJid)
+      : db.prepare(`SELECT * FROM media_raw WHERE message_id = ? LIMIT 1`).get(messageId);
+    return (row as MediaRow | undefined) ?? null;
+  } catch (error) {
+    console.error("Error reading media:", error);
+    return null;
   }
 }

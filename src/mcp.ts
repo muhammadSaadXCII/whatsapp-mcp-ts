@@ -19,7 +19,7 @@ import {
   findDirectChats
 } from "./database.ts";
 
-import { sendWhatsAppMessage, type WhatsAppSocket } from "./whatsapp.ts";
+import { sendWhatsAppMessage, downloadWhatsAppMedia, type WhatsAppSocket } from "./whatsapp.ts";
 import { type P } from "pino";
 
 function formatDbMessageForJson(msg: DbMessage) {
@@ -34,6 +34,7 @@ function formatDbMessageForJson(msg: DbMessage) {
     content: msg.content,
     timestamp: msg.timestamp.toISOString(),
     is_from_me: msg.is_from_me,
+    media_type: msg.media_type ?? null,
   };
 }
 
@@ -122,8 +123,10 @@ export async function startMcpServer(
     "list_messages",
     {
       chat_jid: z.string().optional().describe("Limit to one chat (e.g. '123@s.whatsapp.net' or 'group@g.us'). Omit to search all chats."),
+      chat_name: z.string().optional().describe("Chat, group or channel name (matches on words). Use this instead of chat_jid when you only know the name."),
       sender: z.string().optional().describe("Only messages from this sender (JID, or phone number with country code)"),
       query: z.string().optional().describe("Only messages whose text contains this"),
+      media_type: z.enum(["image", "video", "audio", "document", "sticker"]).optional().describe("Only messages with downloadable media of this type"),
       after: z.string().optional().describe("Only messages after this date/time (ISO, e.g. 2026-10-01)"),
       before: z.string().optional().describe("Only messages before this date/time (ISO)"),
       limit: z.number().int().positive().max(100).optional().default(20).describe("Max messages per page (default 20, max 100)"),
@@ -132,8 +135,8 @@ export async function startMcpServer(
       context_before: z.number().int().nonnegative().max(10).optional().default(1),
       context_after: z.number().int().nonnegative().max(10).optional().default(1),
     },
-    async ({ chat_jid, sender, query, after, before, limit, page, include_context, context_before, context_after }) => {
-      mcpLogger.info(`[MCP Tool] Executing list_messages chat=${chat_jid} sender=${sender} query=${query} limit=${limit} page=${page}`);
+    async ({ chat_jid, chat_name, sender, query, media_type, after, before, limit, page, include_context, context_before, context_after }) => {
+      mcpLogger.info(`[MCP Tool] Executing list_messages chat=${chat_jid} sender=${sender} query=${query} media_type=${media_type} limit=${limit} page=${page}`);
       try {
         const toIso = (s?: string) => {
           if (!s) return undefined;
@@ -142,7 +145,7 @@ export async function startMcpServer(
           return d.toISOString();
         };
         const messages = listMessagesFiltered({
-          chatJid: chat_jid, senderJid: sender, query,
+          chatJid: chat_jid, chatName: chat_name, senderJid: sender, query, mediaType: media_type,
           after: toIso(after), before: toIso(before), limit, page,
         });
         if (!messages.length) return ok("No messages found.");
@@ -228,6 +231,7 @@ export async function startMcpServer(
         .number()
         .int()
         .positive()
+        .max(100)
         .optional()
         .default(20)
         .describe("Max chats per page (default 20)"),
@@ -528,9 +532,10 @@ export async function startMcpServer(
         .number()
         .int()
         .positive()
+        .max(100)
         .optional()
         .default(10)
-        .describe("Max messages per page (default 10)"),
+        .describe("Max messages per page (default 10, max 100)"),
       page: z
         .number()
         .int()
@@ -552,7 +557,7 @@ export async function startMcpServer(
             content: [
               {
                 type: "text",
-                text: `No messages found containing "${query}" in chat ${chat_jid}.`,
+                text: `No messages found containing "${query}" ${searchScope}.`,
               },
             ],
           };
@@ -561,7 +566,7 @@ export async function startMcpServer(
             content: [
               {
                 type: "text",
-                text: `No more messages found containing "${query}" on page ${page} for chat ${chat_jid}.`,
+                text: `No more messages found containing "${query}" on page ${page} ${searchScope}.`,
               },
             ],
           };
@@ -589,6 +594,24 @@ export async function startMcpServer(
             },
           ],
         };
+      }
+    },
+  );
+
+  server.tool(
+    "download_media",
+    {
+      message_id: z.string().min(1).describe("ID of a message containing an image, video, audio, document or sticker (the 'id' from list_messages or search_messages). Only messages whose media_type is not null can be downloaded."),
+      chat_jid: z.string().optional().describe("JID of the chat the message is in (recommended)"),
+    },
+    async ({ message_id, chat_jid }) => {
+      mcpLogger.info(`[MCP Tool] Executing download_media for message ${message_id}`);
+      try {
+        const result = await downloadWhatsAppMedia(waLogger, sock, message_id, chat_jid);
+        return "error" in result ? fail(result.error) : ok({ success: true, ...result });
+      } catch (error: any) {
+        mcpLogger.error(`[MCP Tool Error] download_media failed: ${error.message}`);
+        return fail(`Error downloading media: ${error.message}`);
       }
     },
   );
