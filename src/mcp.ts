@@ -1,26 +1,22 @@
+import { z } from "zod";
+import { type P } from "pino";
+import { jidNormalizedUser } from "@whiskeysockets/baileys";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-import { jidNormalizedUser } from "@whiskeysockets/baileys";
-
+import { sendWhatsAppMessage, downloadWhatsAppMedia, type WhatsAppSocket } from "./whatsapp.ts";
 import {
   type Message as DbMessage,
   type Chat as DbChat,
-  getMessages,
   getChats,
   getChat,
   getMessagesAround,
   searchDbForContacts,
   searchMessages,
-  getDirectChatByContact,
   getContactChats,
   getLastInteraction,
   listMessagesFiltered,
   findDirectChats
 } from "./database.ts";
-
-import { sendWhatsAppMessage, downloadWhatsAppMedia, type WhatsAppSocket } from "./whatsapp.ts";
-import { type P } from "pino";
 
 function formatDbMessageForJson(msg: DbMessage) {
   return {

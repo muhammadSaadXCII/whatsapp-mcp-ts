@@ -3,27 +3,27 @@ import P from "pino";
 import path from "path";
 import open from "open";
 import {
-  makeWASocket,
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
-  DisconnectReason,
+  storeChat,
+  getMediaRaw,
+  storeContact,
+  storeMessage,
+  storeMediaRaw,
+  initializeDatabase,
+  type Message as DbMessage
+} from "./database.ts";
+import {
   proto,
-  type WAMessage,
   isJidGroup,
+  makeWASocket,
+  type WAMessage,
+  DisconnectReason,
   jidNormalizedUser,
   downloadMediaMessage,
-  normalizeMessageContent
+  useMultiFileAuthState,
+  normalizeMessageContent,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
 } from "@whiskeysockets/baileys";
-import {
-  initializeDatabase,
-  storeMessage,
-  storeChat,
-  storeContact,
-  storeMediaRaw,
-  getMediaRaw,
-  type Message as DbMessage,
-} from "./database.ts";
 
 const AUTH_DIR = path.join(import.meta.dirname, "..", "auth_info");
 
@@ -197,7 +197,6 @@ export async function startWhatsAppConnection(
         }
       } else if (connection === "open") {
         logger.info(`Connection opened. WA user: ${sock.user?.name}`);
-        // console.log("Logged as", sock.user?.name);
       }
     }
 

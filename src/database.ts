@@ -1,6 +1,6 @@
-import { DatabaseSync } from "node:sqlite";
-import path from "node:path";
 import fs from "node:fs";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const DATA_DIR = path.join(import.meta.dirname, "..", "data");
 const DB_PATH = path.join(DATA_DIR, "whatsapp.db");
@@ -238,22 +238,22 @@ const MSG_SELECT = `
   LEFT JOIN media_raw mr ON mr.message_id = m.id AND mr.chat_jid = m.chat_jid
 `;
 
-export function getMessages(
-  chatJid: string,
-  limit: number = 20,
-  page: number = 0,
-): Message[] {
-  const db = getDb();
-  try {
-    const offset = page * limit;
-    const stmt = db.prepare(`${MSG_SELECT} WHERE m.chat_jid = ? ORDER BY m.timestamp DESC LIMIT ? OFFSET ?`);
-    const rows = stmt.all(chatJid, limit, offset) as any[];
-    return rows.map(rowToMessage);
-  } catch (error) {
-    console.error("Error getting messages:", error);
-    return [];
-  }
-}
+// export function getMessages(
+//   chatJid: string,
+//   limit: number = 20,
+//   page: number = 0,
+// ): Message[] {
+//   const db = getDb();
+//   try {
+//     const offset = page * limit;
+//     const stmt = db.prepare(`${MSG_SELECT} WHERE m.chat_jid = ? ORDER BY m.timestamp DESC LIMIT ? OFFSET ?`);
+//     const rows = stmt.all(chatJid, limit, offset) as any[];
+//     return rows.map(rowToMessage);
+//   } catch (error) {
+//     console.error("Error getting messages:", error);
+//     return [];
+//   }
+// }
 
 export function getChats(
   limit: number = 20,
@@ -464,30 +464,30 @@ function contactPattern(input: string): string {
   return digits.length >= 6 ? `%${digits}%` : `%${input}%`;
 }
 
-export function getDirectChatByContact(query: string): Chat | null {
-  const db = getDb();
-  try {
-    const byNumber = contactPattern(query);
-    const byName = `%${query}%`;
-    const row = db
-      .prepare(
-        `${CHAT_SELECT}
-         WHERE c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid != 'status@broadcast'
-           AND (c.jid LIKE ?
-                OR LOWER(COALESCE(c.name, '')) LIKE LOWER(?)
-                OR LOWER(COALESCE(ct.name, '')) LIKE LOWER(?)
-                OR LOWER(COALESCE(ct.notify, '')) LIKE LOWER(?)
-                OR COALESCE(ct.phone_number, '') LIKE ?)
-         ORDER BY c.last_message_time DESC NULLS LAST
-         LIMIT 1`,
-      )
-      .get(byNumber, byName, byName, byName, byNumber) as any | undefined;
-    return row ? rowToChat(row) : null;
-  } catch (error) {
-    console.error("Error in getDirectChatByContact:", error);
-    return null;
-  }
-}
+// export function getDirectChatByContact(query: string): Chat | null {
+//   const db = getDb();
+//   try {
+//     const byNumber = contactPattern(query);
+//     const byName = `%${query}%`;
+//     const row = db
+//       .prepare(
+//         `${CHAT_SELECT}
+//          WHERE c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid != 'status@broadcast'
+//            AND (c.jid LIKE ?
+//                 OR LOWER(COALESCE(c.name, '')) LIKE LOWER(?)
+//                 OR LOWER(COALESCE(ct.name, '')) LIKE LOWER(?)
+//                 OR LOWER(COALESCE(ct.notify, '')) LIKE LOWER(?)
+//                 OR COALESCE(ct.phone_number, '') LIKE ?)
+//          ORDER BY c.last_message_time DESC NULLS LAST
+//          LIMIT 1`,
+//       )
+//       .get(byNumber, byName, byName, byName, byNumber) as any | undefined;
+//     return row ? rowToChat(row) : null;
+//   } catch (error) {
+//     console.error("Error in getDirectChatByContact:", error);
+//     return null;
+//   }
+// }
 
 export function findDirectChats(query: string, limit: number = 5): Chat[] {
   const db = getDb();
