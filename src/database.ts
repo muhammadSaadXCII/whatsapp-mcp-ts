@@ -41,15 +41,14 @@ export interface MessageFilters {
   chatName?: string | null;
   senderJid?: string | null;
   query?: string | null;
-  after?: string | null; // ISO string
-  before?: string | null; // ISO string
+  after?: string | null;
+  before?: string | null;
   limit?: number;
   page?: number;
   mediaType?: string | null;
 };
 
 let dbInstance: DatabaseSync | null = null;
-
 function getDb(): DatabaseSync {
   if (!dbInstance) {
     if (!fs.existsSync(DATA_DIR)) {
