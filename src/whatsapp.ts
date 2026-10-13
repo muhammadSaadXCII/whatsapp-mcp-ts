@@ -398,3 +398,115 @@ export async function downloadWhatsAppMedia(
     return { error: `Download failed: ${error.message}. ${hint}` };
   }
 }
+
+const OUTBOX_DIR = path.join(import.meta.dirname, "..", "outbox");
+const MAX_SEND_BYTES = 25 * 1024 * 1024;
+
+const SEND_TYPES: Record<string, { kind: "image" | "video" | "audio" | "document"; mime: string }> = {
+  jpg: { kind: "image", mime: "image/jpeg" },
+  jpeg: { kind: "image", mime: "image/jpeg" },
+  png: { kind: "image", mime: "image/png" },
+  webp: { kind: "image", mime: "image/webp" },
+  gif: { kind: "image", mime: "image/gif" },
+  mp4: { kind: "video", mime: "video/mp4" },
+  "3gp": { kind: "video", mime: "video/3gpp" },
+  mp3: { kind: "audio", mime: "audio/mpeg" },
+  m4a: { kind: "audio", mime: "audio/mp4" },
+  aac: { kind: "audio", mime: "audio/aac" },
+  ogg: { kind: "audio", mime: "audio/ogg" },
+  wav: { kind: "audio", mime: "audio/wav" },
+  pdf: { kind: "document", mime: "application/pdf" },
+  txt: { kind: "document", mime: "text/plain" },
+  csv: { kind: "document", mime: "text/csv" },
+  doc: { kind: "document", mime: "application/msword" },
+  docx: { kind: "document", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+  xls: { kind: "document", mime: "application/vnd.ms-excel" },
+  xlsx: { kind: "document", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+  ppt: { kind: "document", mime: "application/vnd.ms-powerpoint" },
+  pptx: { kind: "document", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation" },
+  zip: { kind: "document", mime: "application/zip" },
+};
+
+export function listOutbox(): { file_name: string; size_bytes: number; sendable: boolean }[] {
+  fs.mkdirSync(OUTBOX_DIR, { recursive: true });
+  return fs
+    .readdirSync(OUTBOX_DIR, { withFileTypes: true })
+    .filter((e) => e.isFile())
+    .map((e) => {
+      const ext = path.extname(e.name).slice(1).toLowerCase();
+      const size = fs.statSync(path.join(OUTBOX_DIR, e.name)).size;
+      return { file_name: e.name, size_bytes: size, sendable: !!SEND_TYPES[ext] && size > 0 && size <= MAX_SEND_BYTES };
+    });
+}
+
+export async function sendWhatsAppFile(
+  logger: P.Logger,
+  sock: WhatsAppSocket | null,
+  recipientJid: string,
+  fileName: string,
+  caption?: string | null,
+  asDocument: boolean = false,
+): Promise<
+  | { message_id: string | null | undefined; file_name: string; sent_as: string; size_bytes: number }
+  | { error: string }
+> {
+  if (!sock || !sock.user) return { error: "WhatsApp connection is not active." };
+
+  if (recipientJid.endsWith("@newsletter") || recipientJid.endsWith("@broadcast")) {
+    return { error: "Files cannot be sent to channels or broadcast lists." };
+  }
+
+  // 1. A bare file name only: no folders, no path tricks
+  if (!fileName || fileName !== path.basename(fileName) || /[\\/:]/.test(fileName) || fileName.includes("..")) {
+    return { error: "file_name must be just a file name inside the outbox folder, with no folders or path segments." };
+  }
+
+  // 2. Allowed types only
+  const ext = path.extname(fileName).slice(1).toLowerCase();
+  const type = SEND_TYPES[ext];
+  if (!type) {
+    return { error: `File type ".${ext}" is not allowed. Allowed types: ${Object.keys(SEND_TYPES).join(", ")}.` };
+  }
+
+  // 3. The real path (after resolving links) must stay inside the outbox
+  fs.mkdirSync(OUTBOX_DIR, { recursive: true });
+  const outboxReal = fs.realpathSync(OUTBOX_DIR);
+  let real: string;
+  try {
+    real = fs.realpathSync(path.join(outboxReal, fileName));
+  } catch {
+    return { error: `File "${fileName}" was not found in the outbox folder.` };
+  }
+  const rel = path.relative(outboxReal, real);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    return { error: "File is not inside the outbox folder." };
+  }
+
+  const st = fs.statSync(real);
+  if (!st.isFile()) return { error: "Not a regular file." };
+  if (st.size === 0) return { error: "File is empty." };
+  if (st.size > MAX_SEND_BYTES) {
+    return { error: `File is too large (${Math.round(st.size / 1048576)} MB; the limit is ${MAX_SEND_BYTES / 1048576} MB).` };
+  }
+
+  try {
+    const buffer = fs.readFileSync(real);
+    const jid = jidNormalizedUser(recipientJid);
+    const kind = asDocument ? "document" : type.kind;
+    const cap = caption ? caption : undefined;
+
+    let content: any;
+    if (kind === "image") content = { image: buffer, mimetype: type.mime, caption: cap };
+    else if (kind === "video") content = { video: buffer, mimetype: type.mime, caption: cap };
+    else if (kind === "audio") content = { audio: buffer, mimetype: type.mime, ptt: false };
+    else content = { document: buffer, mimetype: type.mime, fileName, caption: cap };
+
+    logger.info({ jid, fileName, kind, bytes: st.size }, "Sending file");
+    const result = await sock.sendMessage(jid, content);
+    logger.info({ msgId: result?.key.id }, "File sent");
+    return { message_id: result?.key.id, file_name: fileName, sent_as: kind, size_bytes: st.size };
+  } catch (error: any) {
+    logger.error({ err: error, fileName }, "Failed to send file");
+    return { error: `Failed to send file: ${error.message}` };
+  }
+}

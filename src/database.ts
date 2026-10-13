@@ -24,7 +24,7 @@ export interface MediaRow {
   raw: string;
 }
 
-export type Message = {
+export interface Message {
   id: string;
   chat_jid: string;
   sender?: string | null;
@@ -648,5 +648,14 @@ export function getMediaRaw(messageId: string, chatJid?: string | null): MediaRo
   } catch (error) {
     console.error("Error reading media:", error);
     return null;
+  }
+}
+
+export function chatExists(jid: string): boolean {
+  const db = getDb();
+  try {
+    return !!db.prepare("SELECT 1 FROM chats WHERE jid = ?").get(jid);
+  } catch {
+    return false;
   }
 }

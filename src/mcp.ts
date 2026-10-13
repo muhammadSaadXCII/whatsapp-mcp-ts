@@ -3,7 +3,7 @@ import { type P } from "pino";
 import { jidNormalizedUser } from "@whiskeysockets/baileys";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { sendWhatsAppMessage, downloadWhatsAppMedia, type WhatsAppSocket } from "./whatsapp.ts";
+import { sendWhatsAppMessage, sendWhatsAppFile, listOutbox, downloadWhatsAppMedia, type WhatsAppSocket } from "./whatsapp.ts";
 import {
   type Message as DbMessage,
   type Chat as DbChat,
@@ -15,7 +15,8 @@ import {
   getContactChats,
   getLastInteraction,
   listMessagesFiltered,
-  findDirectChats
+  findDirectChats,
+  chatExists
 } from "./database.ts";
 
 function formatDbMessageForJson(msg: DbMessage) {
@@ -608,6 +609,50 @@ export async function startMcpServer(
       } catch (error: any) {
         mcpLogger.error(`[MCP Tool Error] download_media failed: ${error.message}`);
         return fail(`Error downloading media: ${error.message}`);
+      }
+    },
+  );
+
+  server.tool(
+    "list_outbox",
+    {},
+    async () => {
+      mcpLogger.info("[MCP Tool] Executing list_outbox");
+      try {
+        const files = listOutbox();
+        return files.length ? ok(files) : ok("The outbox folder is empty. The user must place files there first.");
+      } catch (error: any) {
+        return fail(`Error: ${error.message}`);
+      }
+    },
+  );
+
+  server.tool(
+    "send_file",
+    {
+      recipient: z.string().min(1).describe("JID of an existing chat, for example '923...@s.whatsapp.net' or 'group@g.us'"),
+      file_name: z.string().min(1).describe("Name of a file in the outbox folder (just the name, no path). Use list_outbox to see available files."),
+      caption: z.string().max(1000).optional().describe("Optional caption"),
+      as_document: z.boolean().optional().default(false).describe("Send an image or video as an uncompressed document"),
+    },
+    async ({ recipient, file_name, caption, as_document }) => {
+      mcpLogger.info(`[MCP Tool] Executing send_file to ${recipient}: ${file_name}`);
+      try {
+        let jid: string;
+        try {
+          jid = jidNormalizedUser(recipient);
+          if (!jid.includes("@")) throw new Error("bad jid");
+        } catch {
+          return fail(`Invalid recipient "${recipient}". Use a chat JID.`);
+        }
+        if (!chatExists(jid)) {
+          return fail("Recipient is not an existing chat. For safety, files can only be sent to chats that already exist.");
+        }
+        const result = await sendWhatsAppFile(waLogger, sock, jid, file_name, caption, as_document);
+        return "error" in result ? fail(result.error) : ok({ success: true, ...result });
+      } catch (error: any) {
+        mcpLogger.error(`[MCP Tool Error] send_file failed: ${error.message}`);
+        return fail(`Error sending file: ${error.message}`);
       }
     },
   );
