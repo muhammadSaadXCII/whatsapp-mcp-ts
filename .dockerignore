@@ -1,0 +1,30 @@
+# Private data: never send these into the Docker build context
+auth_info/
+data/
+downloads/
+outbox/
+
+# Environment variables
+.env
+
+# Dependencies and build output
+node_modules/
+dist/
+
+# Logs
+info/
+*.log
+
+# Git and Docker files
+.git
+.gitignore
+Dockerfile
+.dockerignore
+
+# Docs
+README.md
+
+# OS generated files
+.DS_Store
+Thumbs.db
+.roo/

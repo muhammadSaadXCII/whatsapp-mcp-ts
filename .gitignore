@@ -5,9 +5,8 @@ node_modules/
 dist/
 
 # Logs
+info/
 *.log
-wa-logs.txt
-mcp-logs.txt
 
 # Baileys authentication data (IMPORTANT!)
 auth_info/
